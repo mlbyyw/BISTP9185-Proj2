@@ -1,41 +1,207 @@
-# load packages
 library(tidyverse)
 library(lme4)
-library(lmerTest)     # p-values for lmer (Satterthwaite)
-library(performance)  # model diagnostics helpers
-library(broom.mixed)  # tidy() for lmer
+library(lmerTest)     
+library(performance)  
+library(broom.mixed)  
 library(ggplot2)
 
-# -------------
-# 0) Load data
-# -------------
+
+
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(scales)
+library(patchwork)
+
+library(tidyverse)
+library(sf)
+library(tigris)
+library(ggplot2)
+
+# read data
 setwd("~/Desktop/CU/BIS9185/BISTP9185-Proj2")
 df <- read_csv("tract_cbsa.csv", show_col_types = FALSE)
 
-# Quick checks
+# Quick checks for NA 
 glimpse(df)
 colSums(is.na(df)) %>% sort(decreasing = TRUE) %>% head(20)
+
+df <- df %>%
+  filter(!is.na(pm25), !is.na(bc))
 
 # Basic cleaning / transforms
 df <- df %>%
   mutate(
-    state_fips = str_pad(as.character(state_fips), 2, pad = "0"),
     cbsa_id    = as.character(cbsa_id),
-    ruca_agg   = factor(ruca_agg, levels = c("urban", "suburban", "rural")),
-    pct_white_10 = pct_white / 10,                   # per 10 percentage points
-    log_dens   = log(dens + 1e-6)                    # avoid log(0)
+    ruca_agg   = factor(ruca_agg, levels = c("urban", "suburban", "rural"))
   )
 
-# Drop rows missing key outcomes/exposures
-df_ana <- df %>%
-  filter(!is.na(pm25), !is.na(bc))
 
-# -----------------------------
-# 1) EDA: distributions & bivar
-# -----------------------------
+
+
+######################
+#     plots!!!!!!    #
+######################
+# state level summary of the data
+states_sf <- tigris::states(cb = TRUE, class = "sf") %>%
+  filter(!STUSPS %in% c("AK","HI","PR")) %>%
+  st_transform(5070)
+
+state_summary <- df %>%
+  group_by(state_fips, state_abb) %>%
+  summarise(
+    pm25_mean = mean(pm25, na.rm = TRUE),
+    dens_mean = mean(dens, na.rm = TRUE),
+    pct_white_mean = mean(pct_white, na.rm = TRUE),
+    pct_black_mean = mean(pct_black, na.rm = TRUE),
+    pct_hispanic_mean = mean(pct_hispanic, na.rm = TRUE),
+    pct_asian_mean = mean(pct_asian, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(state_fips = str_pad(as.character(state_fips), 2, pad = "0"))
+
+state_map_df <- states_sf %>%
+  mutate(state_fips = STATEFP, state_abb = STUSPS) %>%
+  left_join(state_summary, by = c("state_fips","state_abb"))
+
+state_map_df2 <- state_map_df %>%
+  mutate(
+    white_p = pct_white_mean / 100,
+    black_p = pct_black_mean / 100,
+    asian_p = pct_asian_mean / 100,
+    hisp_p  = pct_hispanic_mean / 100
+  ) %>% filter(!is.na(pm25_mean))
+
+
+
+# Theme helper: make maps fill more area + consistent titles
+theme_map <- theme_void() +
+  theme(
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text  = element_text(size = 10),
+    legend.position = "right"
+  )
+
+# ------------------------------------------------------------
+# (A) PM2.5 + Density as ONE faceted plot (aligned sizing)
+
+top_long <- state_map_df2 %>%
+  st_as_sf() %>%
+  select(geometry, pm25_mean, dens_mean) %>%
+  pivot_longer(
+    cols = c(pm25_mean, dens_mean),
+    names_to = "measure",
+    values_to = "value"
+  ) %>%
+  mutate(
+    measure = recode(
+      measure,
+      pm25_mean = "Mean PM2.5 (2010)",
+      dens_mean = "Population Density"
+    )
+  )
+
+# PM2.5 plot (own scale)
+p_pm25 <- ggplot(state_map_df2) +
+  geom_sf(aes(fill = pm25_mean), color = "white", linewidth = 0.2) +
+  coord_sf(datum = NA, expand = FALSE) +
+  scale_fill_gradient(
+    low = "#E3F2FD", high = "#0D47A1",
+    na.value = "grey90",
+    name = "PM2.5"
+  ) +
+  theme_map +
+  labs(title = "Mean PM2.5 (2010)") +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,      # center
+      face = "bold",    # bold
+      size = 12        # optional: bigger text
+    )
+  )
+
+# Density plot (own scale)
+p_dens <- ggplot(state_map_df2) +
+  geom_sf(aes(fill = dens_mean), color = "white", linewidth = 0.2) +
+  coord_sf(datum = NA, expand = FALSE) +
+  scale_fill_gradient(
+    low = "#E3F2FD", high = "#0D47A1",
+    na.value = "grey90",
+    name = "Density"
+  ) +
+  labs(title = "Population Density") +
+  theme_map +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,      # center
+      face = "bold",    # bold
+      size = 12        # optional: bigger text
+    )
+  )
+
+# Combine side-by-side
+p_top <- p_pm25 | p_dens
+p_top
+
+
+# Race as ONE faceted plot (0–1 scale, aligned sizing)
+
+race_long <- state_map_df2 %>%
+  st_as_sf() %>%
+  select(geometry, white_p, black_p, asian_p, hisp_p) %>%
+  pivot_longer(
+    cols = c(white_p, black_p, asian_p, hisp_p),
+    names_to = "race",
+    values_to = "value"
+  ) %>%
+  mutate(
+    race = recode(
+      race,
+      white_p = "Proportion White",
+      black_p = "Proportion Black",
+      asian_p = "Proportion Asian",
+      hisp_p  = "Proportion Hispanic"
+    )
+  )
+
+p_race <- ggplot(race_long) +
+  geom_sf(aes(fill = value), color = "white", linewidth = 0.2) +
+  coord_sf(datum = NA) +
+  facet_wrap(~ race, ncol = 2) +
+  scale_fill_gradient(
+    low = "#E3F2FD",   # light blue
+    high = "#0D47A1",  # dark blue
+    limits = c(0, 1),
+    oob = squish,
+    labels = percent_format(accuracy = 1),
+    na.value = "grey90"
+  )+
+  theme_map
+
+# ------------------------------------------------------------
+# Combine: make bottom row taller so race maps aren't tiny
+# ------------------------------------------------------------
+combined_plot <- p_top / p_race +
+  plot_layout(heights = c(1, 2.3)) 
+
+combined_plot
+
+
+ggsave(
+  "us_maps_large.png",
+  plot = combined_plot,
+  width = 18,   # increase size
+  height = 14,  # increase size
+  dpi = 300
+)
+
+
+
+# EDA
 
 # PM2.5 histogram
-ggplot(df_ana, aes(x = pm25)) +
+ggplot(df, aes(x = pm25)) +
   geom_histogram(bins = 40) +
   labs(
     title = "Distribution of PM2.5 across census tracts",
@@ -45,7 +211,7 @@ ggplot(df_ana, aes(x = pm25)) +
   theme_minimal()
 
 # PM2.5 by RUCA category
-ggplot(df_ana, aes(x = ruca_agg, y = pm25)) +
+ggplot(df, aes(x = ruca_agg, y = pm25)) +
   geom_boxplot(outlier.alpha = 0.2) +
   labs(
     title = "PM2.5 by rural-urban category (RUCA_agg)",
@@ -54,24 +220,74 @@ ggplot(df_ana, aes(x = ruca_agg, y = pm25)) +
   ) +
   theme_minimal()
 
-# Mean PM2.5 by % White deciles
-df_ana %>%
-  mutate(pct_white_bin = cut(pct_white, breaks = seq(0, 100, by = 10), right = FALSE)) %>%
-  group_by(pct_white_bin) %>%
-  summarise(mean_pm25 = mean(pm25, na.rm = TRUE), n = n(), .groups = "drop") %>%
-  ggplot(aes(x = pct_white_bin, y = mean_pm25, group = 1)) +
-  geom_line() +
-  geom_point() +
+# by race percentile
+race_vars <- c(
+  pct_white    = "White",
+  pct_black    = "Black",
+  pct_asian    = "Asian",
+  pct_hispanic = "Hispanic"
+)
+
+df %>%
+  # keep needed columns and drop missing pm25
+  select(pm25, all_of(names(race_vars))) %>%
+  filter(!is.na(pm25)) %>%
+  # long format: one row per (tract, race_group)
+  pivot_longer(
+    cols = all_of(names(race_vars)),
+    names_to = "race_var",
+    values_to = "pct"
+  ) %>%
+  mutate(
+    race_group = recode(race_var, !!!race_vars),
+    
+    # decile bins, include 100% reliably by going to 101 and using right=FALSE
+    pct_bin = cut(
+      pct,
+      breaks = seq(0, 101, by = 10),
+      right = FALSE,
+      include.lowest = TRUE
+    ),
+    
+    # nicer labels like "0–10", "10–20", ..., "90–100"
+    pct_bin_label = case_when(
+      is.na(pct_bin) ~ NA_character_,
+      TRUE ~ str_replace_all(as.character(pct_bin), "\\[|\\)|\\]", "") %>%
+        str_replace(",", "–") %>%
+        str_replace("100–101", "90–100")   # just in case it prints oddly
+    )
+  ) %>%
+  filter(!is.na(pct_bin)) %>%
+  group_by(race_group, pct_bin, pct_bin_label) %>%
+  summarise(
+    mean_pm25 = mean(pm25, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  # order x-axis bins correctly
+  mutate(
+    pct_bin_label = factor(
+      pct_bin_label,
+      levels = c("0–10","10–20","20–30","30–40","40–50","50–60","60–70","70–80","80–90","90–100")
+    )
+  ) %>%
+  ggplot(aes(x = pct_bin_label, y = mean_pm25, color = race_group, group = race_group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
   labs(
-    title = "Mean PM2.5 by % White deciles",
-    x = "% White (binned)",
-    y = "Mean PM2.5"
+    title = "Mean PM2.5 by Race/Ethnicity Share Deciles",
+    x = "Percent of tract population (binned into deciles)",
+    y = "Mean PM2.5",
+    color = "Group"
   ) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
 
 # State-level summaries (useful even without tract geometries)
-state_pm <- df_ana %>%
+state_pm <- df %>%
   group_by(state_abb) %>%
   summarise(
     n_tracts = n(),
@@ -99,11 +315,87 @@ state_pm %>%
   theme_minimal()
 
 # Correlations (selected vars)
-corr_vars <- c("pm25","bc","hyads","dens","pct_white","pct_black","pct_hispanic","pct_asian","pct_pov")
-cor_mat <- df_ana %>%
+corr_vars <- c(
+  "pm25","bc","hyads","dens",
+  "pct_white","pct_black",
+  "pct_hispanic","pct_asian","pct_pov"
+)
+
+# readable labels
+var_labels <- c(
+  pm25         = "PM2.5",
+  bc           = "Black Carbon",
+  hyads        = "Coal Plant Impact",
+  dens         = "Population Density",
+  pct_white    = "% White",
+  pct_black    = "% Black",
+  pct_hispanic = "% Hispanic",
+  pct_asian    = "% Asian",
+  pct_pov      = "% Poverty"
+)
+
+# correlation matrix
+cor_mat <- df %>%
   select(all_of(corr_vars)) %>%
   cor(use = "pairwise.complete.obs")
-print(round(cor_mat, 3))
+
+# reshape + relabel
+cor_long <- cor_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("var1") %>%
+  pivot_longer(-var1, names_to = "var2", values_to = "correlation") %>%
+  mutate(
+    var1 = recode(var1, !!!var_labels),
+    var2 = recode(var2, !!!var_labels)
+  )
+
+# heatmap
+ggplot(cor_long, aes(var1, var2, fill = correlation)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", correlation)),
+            size = 3) +
+  
+  scale_fill_gradient2(
+    low = "#4575B4",
+    mid = "white",
+    high = "#D73027",
+    midpoint = 0,
+    limits = c(-1, 1),
+    name = "Correlation"
+  ) +
+  
+  coord_equal() +
+  
+  labs(
+    title = "Correlation Heatmap: Environmental & Demographic Variables",
+    x = NULL,
+    y = NULL
+  ) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # -------------------------------
 # 2) Hierarchical model: lmer
@@ -115,82 +407,55 @@ print(round(cor_mat, 3))
 #   - hierarchy: (1|state_fips) + (1|state_fips:cbsa_id)
 #     (CBSA random intercept nested within state)
 
-df_model <- df_ana %>%
-  filter(
-    !is.na(pm25),
-    !is.na(pct_white_10),
-    !is.na(log_dens),
-    !is.na(pct_pov),
-    !is.na(ruca_agg),
-    !is.na(bc),
-    !is.na(hyads),
-    !is.na(state_fips),
-    !is.na(cbsa_id)
-  ) %>%
-  mutate(cbsa_in_state = interaction(state_fips, cbsa_id, drop = TRUE))
+df_model <- df %>%
+  mutate(
+    # nested cluster ID
+    cbsa_in_state = interaction(state_fips, cbsa_id, drop = TRUE),
+  )
 
-m1 <- lmer(
-  pm25 ~ pct_white_10 + log_dens + pct_pov + ruca_agg + bc + hyads +
-    (1 | state_fips) + (1 | cbsa_in_state),
-  data = df_model,
-  REML = TRUE
-)
+# -------------------------
+# 1) Primary multilevel model
+#    Random intercepts: state + CBSA-within-state
+# -------------------------
+# m1 <- lmer(
+#   pm25 ~ pct_white + dens + pct_pov + ruca_agg + bc + hyads +
+#     (1 | state_fips) + (1 | cbsa_in_state),
+#   data = df_model,
+#   REML = TRUE
+# )
+# 
+# summary(m1)
+# confint(m1, method = "Wald")  # quick CI
+# 
+# # Tidy fixed effects
+# broom.mixed::tidy(m1, effects = "fixed", conf.int = TRUE)
+# 
+# # Diagnostics
+# performance::check_model(m1)
+# 
+# # Interpretation helper: effect per +10 percentage points White
+# beta_white <- fixef(m1)["pct_white_10"]
+# cat("\nEstimated change in PM2.5 for +10 percentage points White:",
+#     round(beta_white, 4), "ug/m^3\n")
 
-summary(m1)
-confint(m1, method = "Wald")  # fast CI
-
-# Tidy coefficients
-broom.mixed::tidy(m1, effects = "fixed", conf.int = TRUE)
-
-# Model diagnostics (residual checks)
-performance::check_model(m1)
-
-# Interpretation helper:
-# effect per +10 percentage points white = beta for pct_white_10
-beta_white <- fixef(m1)["pct_white_10"]
-cat("\nEstimated change in PM2.5 for +10 percentage points White:", beta_white, "ug/m^3\n")
-
-# ---------------------------------------------
-# 3) Sensitivity checks you may want to include
-# ---------------------------------------------
-
-# (A) Random slopes for % White by CBSA (if you expect heterogeneity across metro areas)
-# NOTE: may be heavier / slower.
+# ------------------------------------------------
+# 2) Sensitivity A: random slope for % White by CBSA-in-state
+#    (more flexible, can be slower / may warn if near-singular)
+# ------------------------------------------------
 m2 <- lmer(
-  pm25 ~ pct_white_10 + log_dens + pct_pov + ruca_agg + bc + hyads +
-    (1 | state_fips) + (1 + pct_white_10 | cbsa_in_state),
+  pm25 ~ pct_white + log(dens) + pct_pov + ruca_agg + bc + hyads +
+    (1 | state_fips) + (1 + pct_white | cbsa_in_state),
   data = df_model,
   REML = TRUE
 )
+
 summary(m2)
+performance::check_model(m2)
 
-# (B) CBSA fixed effects (within-CBSA comparisons), plus state fixed effects
-# This is NOT a random-effects model; it controls for all CBSA-level confounding.
-m_fe <- lm(
-  pm25 ~ pct_white_10 + log_dens + pct_pov + ruca_agg + bc + hyads +
-    factor(state_fips) + factor(cbsa_id),
-  data = df_model
-)
-summary(m_fe)
+# Compare m1 vs m2 (REML=TRUE isn’t ideal for LRT; refit with REML=FALSE if you want formal LRT)
+m1_ml <- update(m1, REML = FALSE)
+m2_ml <- update(m2, REML = FALSE)
+anova(m1_ml, m2_ml)
 
-# If you want cluster-robust SE by CBSA for the FE model:
-# install.packages(c("sandwich","lmtest"))
-library(sandwich)
-library(lmtest)
-coeftest(m_fe, vcov = vcovCL(m_fe, cluster = ~ cbsa_id))
 
-# -----------------------------------------
-# 4) (Optional) Map / choropleth scaffolding
-# -----------------------------------------
-# You do NOT have tract geometries in tract_cbsa.csv.
-# If your assignment allows downloading TIGER/Line tract shapefiles,
-# you can do a tract choropleth by joining geometries on GEOID.
-#
-# Minimal example (requires internet + sf + tigris):
-# install.packages(c("sf","tigris"))
-# library(sf); library(tigris)
-# options(tigris_use_cache = TRUE)
-# tracts <- tigris::tracts(state = "NY", year = 2010, cb = TRUE)  # example state
-# tracts <- tracts %>% mutate(geoid = GEOID)
-# map_df <- tracts %>% left_join(df, by = "geoid")
-# ggplot(map_df) + geom_sf(aes(fill = pm25), color = NA) + theme_void()
+
